@@ -77,18 +77,23 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
         image_only_indicator: Optional[th.Tensor] = None,
         time_context: Optional[int] = None,
         num_video_frames: Optional[int] = None,
+        **kwargs
     ):
+        self.attn_store = {}
         from ...modules.diffusionmodules.video_model import VideoResBlock
 
         for layer in self:
             module = layer
+            
+            print("\n"*2)
+            print(f"FF: {module.__class__.__name__}")
 
             if isinstance(module, TimestepBlock) and not isinstance(
                 module, VideoResBlock
             ):
                 x = layer(x, emb)
             elif isinstance(module, VideoResBlock):
-                x = layer(x, emb, num_video_frames, image_only_indicator)
+                x = layer(x, emb, num_video_frames, image_only_indicator, **kwargs)
             elif isinstance(module, SpatialVideoTransformer):
                 x = layer(
                     x,
@@ -96,11 +101,19 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
                     time_context,
                     num_video_frames,
                     image_only_indicator,
+                    **kwargs
                 )
+                for key in layer.attn_store:
+                    # print(key)
+                    if key in self.attn_store:
+                        self.attn_store[key] += layer.attn_store[key]
+                    else:
+                        self.attn_store[key] = layer.attn_store[key]
             elif isinstance(module, SpatialTransformer):
                 x = layer(x, context)
             else:
                 x = layer(x)
+                    
         return x
 
 

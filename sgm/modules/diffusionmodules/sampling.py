@@ -52,7 +52,8 @@ class BaseDiffusionSampler:
         return x, s_in, sigmas, num_sigmas, cond, uc
 
     def denoise(self, x, denoiser, sigma, cond, uc):
-        denoised = denoiser(*self.guider.prepare_inputs(x, sigma, cond, uc))
+        ## torch.cat([x] * 2), torch.cat([s] * 2), c_out
+        denoised = denoiser(*self.guider.prepare_inputs(x, sigma, c=cond, uc=uc))
         denoised = self.guider(denoised, sigma)
         return denoised
 
@@ -111,12 +112,13 @@ class EDMSampler(SingleStepDiffusionSampler):
             x, cond, uc, num_steps
         )
 
-        for i in self.get_sigma_gen(num_sigmas):
+        for i in self.get_sigma_gen(num_sigmas):  ## for i in range(num_sigmas - 1)
             gamma = (
                 min(self.s_churn / (num_sigmas - 1), 2**0.5 - 1)
                 if self.s_tmin <= sigmas[i] <= self.s_tmax
                 else 0.0
             )
+            ## x = x + dt * d
             x = self.sampler_step(
                 s_in * sigmas[i],
                 s_in * sigmas[i + 1],

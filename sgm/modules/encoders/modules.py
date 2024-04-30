@@ -2,6 +2,8 @@ import math
 from contextlib import nullcontext
 from functools import partial
 from typing import Dict, List, Optional, Tuple, Union
+import copy
+from sgm.util import exists
 
 import kornia
 import numpy as np
@@ -70,7 +72,7 @@ class AbstractEmbModel(nn.Module):
 
 class GeneralConditioner(nn.Module):
     OUTPUT_DIM2KEYS = {2: "vector", 3: "crossattn", 4: "concat", 5: "concat"}
-    KEY2CATDIM = {"vector": 1, "crossattn": 2, "concat": 1}
+    KEY2CATDIM = {"vector": 1, "crossattn": 2, "concat": 1}  ## Key to concate dim
 
     def __init__(self, emb_models: Union[List, ListConfig]):
         super().__init__()
@@ -80,7 +82,9 @@ class GeneralConditioner(nn.Module):
             assert isinstance(
                 embedder, AbstractEmbModel
             ), f"embedder model {embedder.__class__.__name__} has to inherit from AbstractEmbModel"
+            
             embedder.is_trainable = embconfig.get("is_trainable", False)
+            # a classifier-free guidance dropout rate: 
             embedder.ucg_rate = embconfig.get("ucg_rate", 0.0)
             if not embedder.is_trainable:
                 embedder.train = disabled_train
@@ -91,7 +95,7 @@ class GeneralConditioner(nn.Module):
                 f"Initialized embedder #{n}: {embedder.__class__.__name__} "
                 f"with {count_params(embedder, False)} params. Trainable: {embedder.is_trainable}"
             )
-
+            # for example, txt for text-conditioning or cls for class-conditioning
             if "input_key" in embconfig:
                 embedder.input_key = embconfig["input_key"]
             elif "input_keys" in embconfig:
@@ -106,6 +110,7 @@ class GeneralConditioner(nn.Module):
                 embedder.ucg_prng = np.random.RandomState()
 
             embedders.append(embedder)
+        
         self.embedders = nn.ModuleList(embedders)
 
     def possibly_get_ucg_val(self, embedder: AbstractEmbModel, batch: Dict) -> Dict:
@@ -127,18 +132,37 @@ class GeneralConditioner(nn.Module):
             embedding_context = nullcontext if embedder.is_trainable else torch.no_grad
             with embedding_context():
                 if hasattr(embedder, "input_key") and (embedder.input_key is not None):
+                    print(embedder.input_key)
+                    if embedder.input_key == "cond_time_txt":
+                        continue
                     if embedder.legacy_ucg_val is not None:
                         batch = self.possibly_get_ucg_val(embedder, batch)
                     emb_out = embedder(batch[embedder.input_key])
+                    
+                    print(f"{embedder.input_key}'s shape: \n    {emb_out.shape}; out_key: {self.OUTPUT_DIM2KEYS[emb_out.dim()]}")
+                    '''
+                        cond_frames_without_noise's shape: 
+                            [1, 1, 1024]; out_key: crossattn
+                        cond_frames's shape: 
+                            [1, 4, 72, 128]; out_key: concat
+                        
+                        fps_id's shape: torch.Size([25, 256]); out_key: vector
+                        motion_bucket_id's shape: torch.Size([25, 256]); out_key: vector
+                        cond_aug's shape: torch.Size([25, 256]); out_key: vector
+                    '''
                 elif hasattr(embedder, "input_keys"):
                     emb_out = embedder(*[batch[k] for k in embedder.input_keys])
+            
             assert isinstance(
                 emb_out, (torch.Tensor, list, tuple)
             ), f"encoder outputs must be tensors or a sequence, but got {type(emb_out)}"
             if not isinstance(emb_out, (list, tuple)):
                 emb_out = [emb_out]
+            
             for emb in emb_out:
                 out_key = self.OUTPUT_DIM2KEYS[emb.dim()]
+                # print(f"out_key: {out_key}")
+
                 if embedder.ucg_rate > 0.0 and embedder.legacy_ucg_val is None:
                     emb = (
                         expand_dims_like(
@@ -156,6 +180,7 @@ class GeneralConditioner(nn.Module):
                 ):
                     emb = torch.zeros_like(emb)
                 if out_key in output:
+                    ## conditionings of different embedders are concatenated appropriately
                     output[out_key] = torch.cat(
                         (output[out_key], emb), self.KEY2CATDIM[out_key]
                     )
@@ -168,7 +193,8 @@ class GeneralConditioner(nn.Module):
         batch_c: Dict,
         batch_uc: Optional[Dict] = None,
         force_uc_zero_embeddings: Optional[List[str]] = None,
-        force_cond_zero_embeddings: Optional[List[str]] = None,
+        force_cond_zero_embeddings: Optional[List[str]] = None,  
+        # tensor input_keys, eg. "cond_frames"
     ):
         if force_uc_zero_embeddings is None:
             force_uc_zero_embeddings = []
@@ -178,6 +204,82 @@ class GeneralConditioner(nn.Module):
             embedder.ucg_rate = 0.0
         c = self(batch_c, force_cond_zero_embeddings)
         uc = self(batch_c if batch_uc is None else batch_uc, force_uc_zero_embeddings)
+
+        for embedder, rate in zip(self.embedders, ucg_rates):
+            embedder.ucg_rate = rate
+        return c, uc
+    
+    def _forward(
+        self, batch: Dict, force_zero_embeddings: Optional[List] = None
+    ) -> Dict:
+        output = dict()
+        if force_zero_embeddings is None:
+            force_zero_embeddings = []
+        for embedder in self.embedders:
+            embedding_context = nullcontext if embedder.is_trainable else torch.no_grad
+            with embedding_context():
+                if hasattr(embedder, "input_key") and (embedder.input_key is not None):
+                    if embedder.input_key != "cond_time_txt":
+                        continue
+                    if embedder.legacy_ucg_val is not None:
+                        batch = self.possibly_get_ucg_val(embedder, batch)
+                    emb_out = embedder(batch[embedder.input_key])
+                else:
+                    continue
+            assert isinstance(
+                emb_out, (torch.Tensor, list, tuple)
+            ), f"encoder outputs must be tensors or a sequence, but got {type(emb_out)}"
+            
+            if not isinstance(emb_out, (list, tuple)):
+                emb_out = [emb_out]
+            
+            for emb in emb_out:
+                out_key = self.OUTPUT_DIM2KEYS[emb.dim()]
+                ## TODO:
+                if hasattr(embedder, "input_key") and embedder.input_key == "cond_time_txt":
+                    out_key = "time_context"
+                    
+                if embedder.ucg_rate > 0.0 and embedder.legacy_ucg_val is None:
+                    emb = (
+                        expand_dims_like(
+                            torch.bernoulli(
+                                (1.0 - embedder.ucg_rate)
+                                * torch.ones(emb.shape[0], device=emb.device)
+                            ),
+                            emb,
+                        )
+                        * emb
+                    )
+                if (
+                    hasattr(embedder, "input_key")
+                    and embedder.input_key in force_zero_embeddings
+                ):
+                    emb = torch.zeros_like(emb)
+                if out_key in output:
+                    ## conditionings of different embedders are concatenated appropriately
+                    output[out_key] = torch.cat(
+                        (output[out_key], emb), self.KEY2CATDIM[out_key]
+                    )
+                else:
+                    output[out_key] = emb
+        return output
+    
+    def get_time_unconditional_conditioning(
+        self,
+        batch_c: Dict,
+        batch_uc: Optional[Dict] = None,
+        force_uc_zero_embeddings: Optional[List[str]] = None,
+        force_cond_zero_embeddings: Optional[List[str]] = None,  
+        # tensor input_keys, eg. "cond_frames"
+    ):
+        if force_uc_zero_embeddings is None:
+            force_uc_zero_embeddings = []
+        ucg_rates = list()
+        for embedder in self.embedders:
+            ucg_rates.append(embedder.ucg_rate)
+            embedder.ucg_rate = 0.0
+        c = self._forward(batch_c, force_cond_zero_embeddings)
+        uc = self._forward(batch_c if batch_uc is None else batch_uc, force_uc_zero_embeddings)
 
         for embedder, rate in zip(self.embedders, ucg_rates):
             embedder.ucg_rate = rate
@@ -407,15 +509,17 @@ class FrozenOpenCLIPEmbedder2(AbstractEmbModel):
         device="cuda",
         max_length=77,
         freeze=True,
-        layer="last",
+        layer="penultimate",  # "last",
         always_return_pooled=False,
         legacy=True,
+        init_device=None,
     ):
         super().__init__()
         assert layer in self.LAYERS
+        print("Loading FrozenOpenCLIPEmbedder2")
         model, _, _ = open_clip.create_model_and_transforms(
             arch,
-            device=torch.device("cpu"),
+            device=torch.device(default(init_device, "cpu")),
             pretrained=version,
         )
         del model.visual
@@ -506,23 +610,44 @@ class FrozenOpenCLIPEmbedder(AbstractEmbModel):
         self,
         arch="ViT-H-14",
         version="laion2b_s32b_b79k",
-        device="cuda",
         max_length=77,
         freeze=True,
         layer="last",
+        init_device=None,
+        init_model_later=False,
+        use_image_model=False,
+        model=None,
     ):
         super().__init__()
-        assert layer in self.LAYERS
-        model, _, _ = open_clip.create_model_and_transforms(
-            arch, device=torch.device("cpu"), pretrained=version
-        )
-        del model.visual
-        self.model = model
-
+        device=torch.device(default(init_device, "cpu"))
         self.device = device
+
+        if not init_model_later:
+            print(f"I'm FrozenOpenCLIPEmbedder: arch {arch}, version {version}.")
+            if not exists(model):
+                if arch == "ViT-H-14" and version == "laion2b_s32b_b79k":
+                    version = "/cluster/home/geggao/.cache/huggingface/hub/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"
+            
+                model, _, _ = open_clip.create_model_and_transforms(
+                    arch, 
+                    device=device,
+                    pretrained=version
+                )
+            
+            # if use_image_model:
+            #     self.image_model = copy.deepcopy(model)
+            
+            if exists(model.visual) and not use_image_model:
+                del model.visual
+            assert exists(model.transformer)
+            self.model = model
+            
+            if freeze:
+                self.freeze()
+
+        assert layer in self.LAYERS
         self.max_length = max_length
-        if freeze:
-            self.freeze()
+        
         self.layer = layer
         if self.layer == "last":
             self.layer_idx = 0
@@ -530,6 +655,29 @@ class FrozenOpenCLIPEmbedder(AbstractEmbModel):
             self.layer_idx = 1
         else:
             raise NotImplementedError()
+
+    def init_model(self, 
+        model=None, init_device=None, freeze=True,
+        arch="ViT-H-14", version="laion2b_s32b_b79k",):
+        
+        device=torch.device(default(init_device, "cpu"))
+
+        if not exists(model):
+            if arch == "ViT-H-14" and version == "laion2b_s32b_b79k":
+                version = "/cluster/home/geggao/.cache/huggingface/hub/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"
+        
+            model, _, _ = open_clip.create_model_and_transforms(
+                arch, 
+                device=device,
+                pretrained=version
+            )
+        self.model = model
+        # if exists(self.model.visual):
+        #     del self.model.visual
+        assert exists(self.model.transformer)
+        
+        if freeze:
+            self.freeze()
 
     def freeze(self):
         self.model = self.model.eval()
@@ -586,15 +734,25 @@ class FrozenOpenCLIPImageEmbedder(AbstractEmbModel):
         num_image_crops=0,
         output_tokens=False,
         init_device=None,
+        use_text_model=False,
+        model=None
     ):
         super().__init__()
-        model, _, _ = open_clip.create_model_and_transforms(
-            arch,
-            device=torch.device(default(init_device, "cpu")),
-            pretrained=version,
-        )
-        del model.transformer
+        print(f"I'm FrozenOpenCLIPImageEmbedder: arch {arch}, version {version}.")
+
+        if not exists(model):
+            if arch == "ViT-H-14" and version == "laion2b_s32b_b79k":
+                version = "/cluster/home/geggao/.cache/huggingface/hub/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/snapshots/de081ac0a0ca8dc9d1533eed1ae884bb8ae1404b/open_clip_pytorch_model.bin"
+            model, _, _ = open_clip.create_model_and_transforms(
+                arch,
+                device=torch.device(default(init_device, "cpu")),
+                pretrained=version,
+            )
+                
+        if exists(model.transformer) and not use_text_model:
+            del model.transformer
         self.model = model
+        
         self.max_crops = num_image_crops
         self.pad_to_max_len = self.max_crops > 0
         self.repeat_to_max_len = repeat_to_max_len and (not self.pad_to_max_len)
@@ -637,7 +795,7 @@ class FrozenOpenCLIPImageEmbedder(AbstractEmbModel):
             param.requires_grad = False
 
     @autocast
-    def forward(self, image, no_dropout=False):
+    def forward(self, image, no_dropout=False):        
         z = self.encode_with_vision_transformer(image)
         tokens = None
         if self.output_tokens:

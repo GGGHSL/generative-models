@@ -53,7 +53,7 @@ model:
           params:
             outdim: 256
 
-        - input_key: motion_bucket_id
+        - input_key: motion_bucket_id   ## The higher the number, the more motion will be in the video
           is_trainable: False
           target: sgm.modules.encoders.modules.ConcatTimestepEmbedderND
           params:

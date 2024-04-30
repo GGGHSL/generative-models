@@ -156,7 +156,7 @@ class VideoBlock(AttnBlock):
         x_mix = x_mix + emb
 
         alpha = self.get_alpha()
-        x_mix = self.time_mix_block(x_mix, timesteps=timesteps)
+        x_mix = self.time_mix_block(x_mix, timesteps=timesteps)  ## no context??
         x = alpha * x + (1.0 - alpha) * x_mix  # alpha merge
 
         x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w)
@@ -307,6 +307,10 @@ class VideoDecoder(Decoder):
         assert (
             self.time_mode in self.available_time_modes
         ), f"time_mode parameter has to be in {self.available_time_modes}"
+        print(*args)
+        # self.attn_type = args["attn_type"]
+        # exit
+        
         super().__init__(*args, **kwargs)
 
     def get_last_layer(self, skip_time_mix=False, **kwargs):
@@ -321,22 +325,29 @@ class VideoDecoder(Decoder):
 
     def _make_attn(self) -> Callable:
         if self.time_mode not in ["conv-only", "only-last-conv"]:
+            print(f"{self.__class__.__name__}: I'm (MemoryEfficient-) VideoBlock!")
             return partialclass(
                 make_time_attn,
                 alpha=self.alpha,
                 merge_strategy=self.merge_strategy,
             )
         else:
-            return super()._make_attn()
+            # block_name = "AttnBlock" if self.attn_type == "vanilla" else "MemoryEfficientAttnBlock"
+            block_name = "(MemoryEfficient) AttnBlock"
+            print(f"{self.__class__.__name__}: I'm {block_name}!")
+            return super()._make_attn()  ## self-attention
 
     def _make_conv(self) -> Callable:
         if self.time_mode != "attn-only":
+            print(f"{self.__class__.__name__}: I'm AE3DConv!")
             return partialclass(AE3DConv, video_kernel_size=self.video_kernel_size)
         else:
+            print(f"{self.__class__.__name__}: I'm Conv2DWrapper!")
             return Conv2DWrapper
 
     def _make_resblock(self) -> Callable:
         if self.time_mode not in ["attn-only", "only-last-conv"]:
+            print(f"{self.__class__.__name__}: I'm VideoResBlock!")
             return partialclass(
                 VideoResBlock,
                 video_kernel_size=self.video_kernel_size,
@@ -344,4 +355,5 @@ class VideoDecoder(Decoder):
                 merge_strategy=self.merge_strategy,
             )
         else:
+            print(f"{self.__class__.__name__}: I'm ResnetBlock!")
             return super()._make_resblock()

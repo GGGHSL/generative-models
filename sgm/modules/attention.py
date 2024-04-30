@@ -369,6 +369,7 @@ class MemoryEfficientCrossAttention(nn.Module):
             nn.Linear(inner_dim, query_dim), nn.Dropout(dropout)
         )
         self.attention_op: Optional[Any] = None
+        self.thres = nn.Threshold(0.001, 0.)
 
     def forward(
         self,
@@ -377,6 +378,8 @@ class MemoryEfficientCrossAttention(nn.Module):
         mask=None,
         additional_tokens=None,
         n_times_crossframe_attn_in_self=0,
+        use_attn=False,
+        calc_precision=False
     ):
         if additional_tokens is not None:
             # get the number of masked tokens at the beginning of the output sequence
@@ -417,40 +420,139 @@ class MemoryEfficientCrossAttention(nn.Module):
         if version.parse(xformers.__version__) >= version.parse("0.0.21"):
             # NOTE: workaround for
             # https://github.com/facebookresearch/xformers/issues/845
-            max_bs = 32768
+            max_bs = 32768   ## Batch size >= 65536 gives CUDA error
             N = q.shape[0]
             n_batches = math.ceil(N / max_bs)
             out = list()
+            attn = list()
             for i_batch in range(n_batches):
                 batch = slice(i_batch * max_bs, (i_batch + 1) * max_bs)
-                out.append(
-                    xformers.ops.memory_efficient_attention(
-                        q[batch],
-                        k[batch],
-                        v[batch],
-                        attn_bias=None,
-                        op=self.attention_op,
-                    )
+                out_batch = xformers.ops.memory_efficient_attention(
+                    q[batch],
+                    k[batch],
+                    v[batch],
+                    attn_bias=None, 
+                    # attn_bias=xformers.ops.LowerTriangularMask(), #FIXME: not aligned
+                    op=self.attention_op,
                 )
+                out.append(out_batch)
+                
+                ## For attn maps storage
+                if use_attn:
+                    # print(
+                    #     f" q[batch]'s shape: {q[batch].shape}\n", ## [32768, 25, 64]
+                    #     f"k[batch]'s shape: {k[batch].shape}\n",  ## [32768, 77, 64]
+                    #     f"v[batch]'s shape: {v[batch].shape}\n",  ## [32768, 77, 64]
+                    #     f"out_batch's shape: {out_batch.shape}"   ## [32768, 25, 64]
+                    # )
+                    qq = q[batch].detach()
+                    kk = k[batch].detach()
+                    scale = 1 / qq.shape[-1] ** 0.5  ## 0.125
+                    qq = qq * scale
+                    
+                    attn_batch = torch.einsum("b i d, b j d -> b i j", qq, kk)
+                    # attn_batch = qq @ kk.transpose(-2, -1)
+                    
+                    attn_batch = attn_batch.softmax(-1)
+                    attn_batch = F.dropout(attn_batch, 0.)
+                    # print(f"attn_batch shape: {attn_batch.shape}")
+                    
+                    if calc_precision:
+                        vv = v[batch].detach()
+                        out_sep = torch.einsum("b i d, b d j -> b i j", attn_batch, vv)
+                        # out_sep = attn_batch @ vv
+                        
+                        diff = torch.abs(out_batch - out_sep)
+                        thres_diff = self.thres(diff)
+                        if thres_diff.sum():
+                            print(thres_diff.sum())  ## 0.6854
+                            locs = (thres_diff != 0.).nonzero(as_tuple=False)
+                            print("Number of different locs: ", locs.shape[0])  ## [372, 3]
+                            # print(thres_diff)
+                            # assert 0 == 1
+                        else:
+                            print("Zero error! :D")
+                    
+                    attn.append(attn_batch)
+                    del qq, kk, attn_batch   
+                    '''
+                    ## [batch_size, seqlen_k, num_heads_k, head_size_og]
+                    # v_b, v_h, _ = v[batch].shape  ## N, 77, 64
+                    # fake_v = torch.ones([v_b, v_h, v_h], dtype=v.dtype, device=v.device)
+                    # print(f"fake_v's shape: {fake_v.shape}")
+                    # ## N, 77, 77
+                    # attn_batch = xformers.ops.memory_efficient_attention(
+                    #     q[batch],
+                    #     k[batch],
+                    #     fake_v,
+                    #     attn_bias=None,
+                    #     op=self.attention_op,
+                    # )  ## N, 25, 77
+                    # print(f"attn shape: {attn_batch.shape}")
+                    # out_sep = torch.einsum("b i d, b d j -> b i j", attn_batch, v[batch])
+                    
+                    # assert out_batch == out_sep
+                    # attn.append(attn_batch)
+                    '''
+            
             out = torch.cat(out, 0)
+            if use_attn:
+                attn = torch.cat(attn, 0)
+                print(f"Cross-attn map's shape: {attn.shape}, heads={self.heads}, b=2*h*w={b}")  ## attn map: [(2 h w heads), 25, 77]
+                print(f"\nRaw out's shape: {out.shape}")  ## raw out: [N, 25, 64]
+
         else:
             out = xformers.ops.memory_efficient_attention(
                 q, k, v, attn_bias=None, op=self.attention_op
             )
+            if use_attn:
+                print(f"q's shape: {q.shape}", 
+                    f"k's shape: {k.shape}", f"v's shape: {v.shape}")
+                with torch.no_grad():
+                    scale = 1 / q.shape[-1] ** 0.5
+                    q *= scale
+                    attn = torch.einsum("b i d, b j d -> b i j", q, k)
+                    print("Visualization attn maps' shape:", attn_batch.shape)
 
-        # TODO: Use this directly in the attention operation, as a bias
         if exists(mask):
+            # Use this directly in the attention operation, as a bias
             raise NotImplementedError
+        
+        ## h=72 w=128  92160 25 64
+        # print("b: ", b)  ## b=(2 h w)
+        # print("self.heads: ", self.heads)  ## changing
+        # print("self.dim_head: ", self.dim_head)   ## ==64
         out = (
-            out.unsqueeze(0)
-            .reshape(b, self.heads, out.shape[1], self.dim_head)
-            .permute(0, 2, 1, 3)
-            .reshape(b, out.shape[1], self.heads * self.dim_head)
+            out.unsqueeze(0)  ##  1, 92160, 25, 64
+            .reshape(b, self.heads, out.shape[1], self.dim_head)  ##  b=2hw, 5, 25, 64
+            .permute(0, 2, 1, 3)  ## b=2hw, num_f=25, heads=5, dim=64
+            .reshape(b, out.shape[1], self.heads * self.dim_head)  ## 18432, 25, 320
         )
         if additional_tokens is not None:
             # remove additional token
             out = out[:, n_tokens_to_mask:]
-        return self.to_out(out)
+        
+        output = self.to_out(out)  ## MLP: to Q's dim
+        if use_attn:
+            attn = (  ## (2 h w heads), 25, 77
+                attn.unsqueeze(0)  ## 1, (2 h w heads), 25, 77
+                .reshape(b, self.heads, attn.shape[1], attn.shape[-1])   ## ## (2 h w), heads, 25, 77
+                .mean(dim=1)   ## average over heads:  ## (2 h w), 25, 77
+            )
+            # attn = rearrange(attn, "(b s) t c -> (b t) s c", s=)
+            print(f"Rearranged cross-attn map's shape: {attn.shape}")  ## (2 h w), 25, 77
+            print(f"Rearranged out's shape: {out.shape}")  ## 18432, 25, 320
+            print(f"Final cross-attn output's shape: {output.shape}")  ##  b=2hw=18432, 25, query_dim=320
+            ## Next: reshape attn map
+            # x = rearrange(
+            #     x, "(b s) t c -> (b t) s c", 
+            #     s=S,  ## h * w
+            #     b=B // timesteps,  ## B = 2 * num_frames
+            #     c=C, 
+            #     t=timesteps,  ## num_frames
+            # )
+            return output, attn
+        return output
 
 
 class BasicTransformerBlock(nn.Module):
@@ -525,7 +627,9 @@ class BasicTransformerBlock(nn.Module):
             logpy.debug(f"{self.__class__.__name__} is using checkpointing")
 
     def forward(
-        self, x, context=None, additional_tokens=None, n_times_crossframe_attn_in_self=0
+        self, x, context=None, additional_tokens=None, 
+        n_times_crossframe_attn_in_self=0,
+
     ):
         kwargs = {"x": x}
 
@@ -551,6 +655,14 @@ class BasicTransformerBlock(nn.Module):
     def _forward(
         self, x, context=None, additional_tokens=None, n_times_crossframe_attn_in_self=0
     ):
+        ## First Attention: ====
+        attn1_cross = True if self.disable_self_attn else False
+        print(f"*** {self.__class__.__name__}.attn1 is a spatial {'cross-' if attn1_cross else 'self-'}attenion", 
+              end=" *** ")
+        ## TODO: OOM
+        # attn1_kwargs = {}
+        # if attn1_cross:
+        #     attn1_kwargs["use_attn"] = attn1_cross
         x = (
             self.attn1(
                 self.norm1(x),
@@ -559,16 +671,26 @@ class BasicTransformerBlock(nn.Module):
                 n_times_crossframe_attn_in_self=n_times_crossframe_attn_in_self
                 if not self.disable_self_attn
                 else 0,
+                # **attn1_kwargs
             )
             + x
         )
+        
+        ## Second Attention: ====
+        attn2_cross = True if context is not None else False
+        print(f"*** {self.__class__.__name__}.attn2 is a spatial {'cross-' if attn2_cross else 'self-'}attention", end=" *** ")
+        # attn2_kwargs = {}
+        # if attn2_cross:
+        #     attn2_kwargs["use_attn"] = attn2_cross
         x = (
             self.attn2(
-                self.norm2(x), context=context, additional_tokens=additional_tokens
+                self.norm2(x), context=context, additional_tokens=additional_tokens,
+                # **attn2_kwargs  ##TODO: change output
             )
             + x
         )
         x = self.ff(self.norm3(x)) + x
+        print(f"Current {self.__class__.__name__} finished.")
         return x
 
 

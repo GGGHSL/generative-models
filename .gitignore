@@ -12,3 +12,7 @@
 /outputs
 /build
 /src
+
+*edit*
+*test_images
+.gitignore

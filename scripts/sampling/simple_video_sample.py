@@ -22,15 +22,18 @@ from torchvision.transforms import ToTensor
 
 
 def sample(
-    input_path: str = "assets/test_image.png",  # Can either be image file or folder with image files
+    input_path: str = "scripts/sampling/test_images/long_jumping.png",  
+    ## "assets/test_image.png",  
+    # Can either be image file or folder with image files
     num_frames: Optional[int] = None,  # 21 for SV3D
     num_steps: Optional[int] = None,
-    version: str = "svd",
+    version: str = "svd_xt",
     fps_id: int = 6,
-    motion_bucket_id: int = 127,
-    cond_aug: float = 0.02,
+    motion_bucket_id: int = 250,  ## 127,
+    cond_aug: float = 0.5, ## 0.02,
     seed: int = 23,
-    decoding_t: int = 14,  # Number of frames decoded at a time! This eats most VRAM. Reduce if necessary.
+    decoding_t: int = 5,  ## 14
+    # Number of frames decoded at a time! This eats most VRAM. Reduce if necessary.
     device: str = "cuda",
     output_folder: Optional[str] = None,
     elevations_deg: Optional[float | List[float]] = 10.0,  # For SV3D
@@ -109,6 +112,8 @@ def sample(
     if path.is_file():
         if any([input_path.endswith(x) for x in ["jpg", "jpeg", "png"]]):
             all_img_paths = [input_path]
+            NAME = input_path.split("/")[-1].split(".")[0]
+            output_folder = os.path.join(output_folder, NAME)
         else:
             raise ValueError("Path is not valid image file.")
     elif path.is_dir():
@@ -162,8 +167,9 @@ def sample(
 
         else:
             with Image.open(input_img_path) as image:
-                if image.mode == "RGBA":
-                    input_image = image.convert("RGB")
+                # if image.mode == "RGBA":
+                #     input_image = image.convert("RGB")
+                input_image = image.convert("RGB")
                 w, h = image.size
 
                 if h % 64 != 0 or w % 64 != 0:
@@ -271,7 +277,18 @@ def sample(
                     .astype(np.uint8)
                 )
                 video_path = os.path.join(output_folder, f"{base_count:06d}.mp4")
-                imageio.mimwrite(video_path, vid)
+                # imageio.mimwrite(video_path, vid)
+                writer = cv2.VideoWriter(
+                    video_path,
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    fps_id + 1,
+                    (samples.shape[-1], samples.shape[-2]),
+                )
+                for frame in vid:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    writer.write(frame)
+                writer.release()
+                print(f"Saved video at {video_path}.")
 
 
 def get_unique_embedder_keys_from_conditioner(conditioner):

@@ -276,12 +276,13 @@ class MemoryEfficientCrossAttentionWrapper(MemoryEfficientCrossAttention):
 
 def make_attn(in_channels, attn_type="vanilla", attn_kwargs=None):
     assert attn_type in [
-        "vanilla",
+        "vanilla",  ## self-attention
         "vanilla-xformers",
         "memory-efficient-cross-attn",
         "linear",
         "none",
     ], f"attn_type {attn_type} unknown"
+    
     if (
         version.parse(torch.__version__) < version.parse("2.0.0")
         and attn_type != "none"
@@ -294,13 +295,13 @@ def make_attn(in_channels, attn_type="vanilla", attn_kwargs=None):
     logpy.info(f"making attention of type '{attn_type}' with {in_channels} in_channels")
     if attn_type == "vanilla":
         assert attn_kwargs is None
-        return AttnBlock(in_channels)
+        return AttnBlock(in_channels)  ## self-attention
     elif attn_type == "vanilla-xformers":
         logpy.info(
             f"building MemoryEfficientAttnBlock with {in_channels} in_channels..."
         )
         return MemoryEfficientAttnBlock(in_channels)
-    elif type == "memory-efficient-cross-attn":
+    elif attn_type == "memory-efficient-cross-attn":  ##
         attn_kwargs["query_dim"] = in_channels
         return MemoryEfficientCrossAttentionWrapper(**attn_kwargs)
     elif attn_type == "none":
@@ -613,7 +614,7 @@ class Decoder(nn.Module):
         dropout=0.0,
         resamp_with_conv=True,
         in_channels,
-        resolution,
+        resolution,  ## 256
         z_channels,
         give_pre_end=False,
         tanh_out=False,
@@ -626,7 +627,7 @@ class Decoder(nn.Module):
             attn_type = "linear"
         self.ch = ch
         self.temb_ch = 0
-        self.num_resolutions = len(ch_mult)
+        self.num_resolutions = len(ch_mult)  ## 4
         self.num_res_blocks = num_res_blocks
         self.resolution = resolution
         self.in_channels = in_channels
@@ -636,7 +637,7 @@ class Decoder(nn.Module):
         # compute in_ch_mult, block_in and curr_res at lowest res
         in_ch_mult = (1,) + tuple(ch_mult)
         block_in = ch * ch_mult[self.num_resolutions - 1]
-        curr_res = resolution // 2 ** (self.num_resolutions - 1)
+        curr_res = resolution // 2 ** (self.num_resolutions - 1)  ## 256 // 8
         self.z_shape = (1, z_channels, curr_res, curr_res)
         logpy.info(
             "Working with z of shape {} = {} dimensions.".format(
@@ -647,6 +648,7 @@ class Decoder(nn.Module):
         make_attn_cls = self._make_attn()
         make_resblock_cls = self._make_resblock()
         make_conv_cls = self._make_conv()
+        
         # z to block_in
         self.conv_in = torch.nn.Conv2d(
             z_channels, block_in, kernel_size=3, stride=1, padding=1
@@ -670,11 +672,11 @@ class Decoder(nn.Module):
 
         # upsampling
         self.up = nn.ModuleList()
-        for i_level in reversed(range(self.num_resolutions)):
+        for i_level in reversed(range(self.num_resolutions)):  ## [3,2,1,0]
             block = nn.ModuleList()
             attn = nn.ModuleList()
             block_out = ch * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks + 1):
+            for i_block in range(self.num_res_blocks + 1):  ## [0,1,2]
                 block.append(
                     make_resblock_cls(
                         in_channels=block_in,
@@ -730,9 +732,12 @@ class Decoder(nn.Module):
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
+                # block
                 h = self.up[i_level].block[i_block](h, temb, **kwargs)
+                # attn
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h, **kwargs)
+            # upsampling
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 

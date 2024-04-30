@@ -23,6 +23,7 @@ class DiffusionEngine(pl.LightningModule):
         denoiser_config,
         first_stage_config,
         conditioner_config: Union[None, Dict, ListConfig, OmegaConf] = None,
+        time_conditioner_config: Union[None, Dict, ListConfig, OmegaConf] = None,
         sampler_config: Union[None, Dict, ListConfig, OmegaConf] = None,
         optimizer_config: Union[None, Dict, ListConfig, OmegaConf] = None,
         scheduler_config: Union[None, Dict, ListConfig, OmegaConf] = None,
@@ -79,6 +80,10 @@ class DiffusionEngine(pl.LightningModule):
 
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path)
+        ## Module not included in the SVD ckpt
+        self.time_conditioner = instantiate_from_config(
+            default(time_conditioner_config, UNCONDITIONAL_CONFIG)
+        )
 
         self.en_and_decode_n_samples_a_time = en_and_decode_n_samples_a_time
 
@@ -98,7 +103,8 @@ class DiffusionEngine(pl.LightningModule):
             f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys"
         )
         if len(missing) > 0:
-            print(f"Missing Keys: {missing}")
+            missing_list = [k_ for k_ in missing if '.open_clip.model.transformer' not in k_]
+            print(f"Missing Keys: {missing_list}")
         if len(unexpected) > 0:
             print(f"Unexpected Keys: {unexpected}")
 
@@ -107,7 +113,7 @@ class DiffusionEngine(pl.LightningModule):
         model.train = disabled_train
         for param in model.parameters():
             param.requires_grad = False
-        self.first_stage_model = model
+        self.first_stage_model = model  ## temporal_ae.VideoDecoder
 
     def get_input(self, batch):
         # assuming unified data format, dataloader returns a dict.
@@ -116,7 +122,7 @@ class DiffusionEngine(pl.LightningModule):
 
     @torch.no_grad()
     def decode_first_stage(self, z):
-        z = 1.0 / self.scale_factor * z
+        z = 1.0 / self.scale_factor * z  # svd scale_factor := 0.18215
         n_samples = default(self.en_and_decode_n_samples_a_time, z.shape[0])
 
         n_rounds = math.ceil(z.shape[0] / n_samples)
@@ -125,6 +131,8 @@ class DiffusionEngine(pl.LightningModule):
             for n in range(n_rounds):
                 if isinstance(self.first_stage_model.decoder, VideoDecoder):
                     kwargs = {"timesteps": len(z[n * n_samples : (n + 1) * n_samples])}
+                    print(f"first_stage_model.decoder: VideoDecoder, timesteps: {len(z[n * n_samples : (n + 1) * n_samples])}")
+                    ## 5
                 else:
                     kwargs = {}
                 out = self.first_stage_model.decode(

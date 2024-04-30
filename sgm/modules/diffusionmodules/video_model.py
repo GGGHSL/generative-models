@@ -65,7 +65,9 @@ class VideoResBlock(ResBlock):
         emb: th.Tensor,
         num_video_frames: int,
         image_only_indicator: Optional[th.Tensor] = None,
+        **kwargs,
     ) -> th.Tensor:
+
         x = super().forward(x, emb)
 
         x_mix = rearrange(x, "(b t) c h w -> b c t h w", t=num_video_frames)
@@ -108,7 +110,7 @@ class VideoUNet(nn.Module):
         extra_ff_mix_layer: bool = False,
         use_spatial_context: bool = False,
         merge_strategy: str = "fixed",
-        merge_factor: float = 0.5,
+        merge_factor: float = 0.5,   ## AlphaBlender: alpha for spatial, (1-alpha) for temporal
         spatial_transformer_attn_type: str = "softmax",
         video_kernel_size: Union[int, List[int]] = 3,
         use_linear_in_transformer: bool = False,
@@ -206,8 +208,8 @@ class VideoUNet(nn.Module):
         ):
             return SpatialVideoTransformer(
                 ch,
-                num_heads,
-                dim_head,
+                n_heads=num_heads,
+                d_head=dim_head,
                 depth=depth,
                 context_dim=context_dim,
                 time_context_dim=time_context_dim,
@@ -219,7 +221,7 @@ class VideoUNet(nn.Module):
                 checkpoint=use_checkpoint,
                 use_linear=use_linear_in_transformer,
                 attn_mode=spatial_transformer_attn_type,
-                disable_self_attn=disabled_sa,
+                disable_self_attn=disabled_sa,  ## FIXME: currently control both temporal and spatial (super module)
                 disable_temporal_crossattention=disable_temporal_crossattention,
                 max_time_embed_period=max_ddpm_temb_period,
             )
@@ -253,6 +255,7 @@ class VideoUNet(nn.Module):
                 up=up,
             )
 
+        # Input block: ================================
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
                 layers = [
@@ -324,6 +327,7 @@ class VideoUNet(nn.Module):
 
                 self._feature_size += ch
 
+        # Middle block: =========================
         if num_head_channels == -1:
             dim_head = ch // num_heads
         else:
@@ -364,6 +368,8 @@ class VideoUNet(nn.Module):
                 use_scale_shift_norm=use_scale_shift_norm,
             ),
         )
+        
+        # Output block: =========================
         self._feature_size += ch
 
         self.output_blocks = nn.ModuleList([])
@@ -439,6 +445,17 @@ class VideoUNet(nn.Module):
             zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
         )
 
+        self.cur_step = 0
+        self.attention_store = {}
+
+
+    def _reset(self):
+        self.attention_store = {}
+
+    def get_average_attention(self):
+        average_attention = {key: [item / self.cur_step for item in self.attention_store[key]] for key in self.attention_store}
+        return average_attention
+    
     def forward(
         self,
         x: th.Tensor,
@@ -449,6 +466,14 @@ class VideoUNet(nn.Module):
         num_video_frames: Optional[int] = None,
         image_only_indicator: Optional[th.Tensor] = None,
     ):
+        # self.attention_store = {}  ## TODO: save by time step?
+        self.cur_step += 1
+
+        print("VideoUNet cur_step: ", self.cur_step)
+        step_key = str(self.cur_step)
+        if not step_key in self.attention_store:
+            self.attention_store[step_key] = {}
+
         assert (y is not None) == (
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional -> no, relax this TODO"
@@ -461,6 +486,10 @@ class VideoUNet(nn.Module):
             emb = emb + self.label_emb(y)
 
         h = x
+
+        print("\n" * 2)
+        print("VideoUNet - Input block: ======================================================")
+        kwargs = {"key": "down"}
         for module in self.input_blocks:
             h = module(
                 h,
@@ -469,8 +498,20 @@ class VideoUNet(nn.Module):
                 image_only_indicator=image_only_indicator,
                 time_context=time_context,
                 num_video_frames=num_video_frames,
+                **kwargs
             )
+            for key in module.attn_store:
+                # print(key)
+                if key in self.attention_store[step_key]:
+                    self.attention_store[step_key][key] += module.attn_store[key]
+                else:
+                    self.attention_store[step_key][key] = module.attn_store[key]
+
             hs.append(h)
+        
+        print("\n" * 2)
+        print("VideoUNet - Middle block: ======================================================")
+        kwargs = {"key": "mid"}
         h = self.middle_block(
             h,
             emb,
@@ -478,7 +519,18 @@ class VideoUNet(nn.Module):
             image_only_indicator=image_only_indicator,
             time_context=time_context,
             num_video_frames=num_video_frames,
+            **kwargs
         )
+        for key in self.middle_block.attn_store:
+            # print(key)
+            if key in self.attention_store[step_key]:
+                self.attention_store[step_key][key] += self.middle_block.attn_store[key]
+            else:
+                self.attention_store[step_key][key] = self.middle_block.attn_store[key]
+
+        print("\n" * 3)
+        print("VideoUNet - Output block: ======================================================")
+        kwargs = {"key": "up"}
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
             h = module(
@@ -488,6 +540,43 @@ class VideoUNet(nn.Module):
                 image_only_indicator=image_only_indicator,
                 time_context=time_context,
                 num_video_frames=num_video_frames,
+                **kwargs
             )
+            for key in module.attn_store:
+                # print(key)
+                if key in self.attention_store[step_key]:
+                    self.attention_store[step_key][key] += module.attn_store[key]
+                else:
+                    self.attention_store[step_key][key] = module.attn_store[key]
+            
         h = h.type(x.dtype)
-        return self.out(h)
+
+        for key in self.attention_store[step_key]:
+            for attn in self.attention_store[step_key][key]:
+                print(f"Step {step_key} {key}: {attn.shape}")
+        '''
+        down_temporal_cross: torch.Size([92160, 25, 77])
+        down_temporal_cross: torch.Size([92160, 25, 77])
+        down_temporal_cross: torch.Size([46080, 25, 77])
+        down_temporal_cross: torch.Size([46080, 25, 77])
+        down_temporal_cross: torch.Size([23040, 25, 77])
+        down_temporal_cross: torch.Size([23040, 25, 77]) heads: 20  b: 1152
+        
+        mid_temporal_cross: torch.Size([5760, 25, 77]) heads: 20  b: 288
+        
+        up_temporal_cross: torch.Size([23040, 25, 77]) heads: 20  b: 1152
+        up_temporal_cross: torch.Size([23040, 25, 77]) heads: 20  b: 1152
+        up_temporal_cross: torch.Size([23040, 25, 77]) heads: 20  b: 1152
+        up_temporal_cross: torch.Size([46080, 25, 77]) heads: 10
+        up_temporal_cross: torch.Size([46080, 25, 77]) heads: 10
+        up_temporal_cross: torch.Size([46080, 25, 77]) heads: 10
+        up_temporal_cross: torch.Size([92160, 25, 77]) heads: 5
+        up_temporal_cross: torch.Size([92160, 25, 77]) heads: 5
+        up_temporal_cross: torch.Size([92160, 25, 77]) heads: 5  q## (2 72 128 5) 25 77 
+        '''
+        
+        out = self.out(h)
+        print(f"VideoUNet output's shape: {out.shape}" )  ## [50, 4, 72, 128]
+        
+        self._reset()
+        return out
