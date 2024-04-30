@@ -175,16 +175,16 @@ class VideoTransformerBlock(nn.Module):
                     
                     if h is not None and w is not None:
                         attn = rearrange(
-                            attn, "b (h w) c -> b c h w",
-                            h=h, w=w, b=attn.shape[0], c=attn.shape[-1])
+                            attn, "b (h w) k -> b h w k",
+                            h=h, w=w, b=attn.shape[0], k=attn.shape[-1])
                         print(f"Spatial rearranged cross-attn map: {attn.shape}")
+                        ## (2 25) h w 77
                     
                     key = "cross"  ## if use_attn else "cross_with_spatial"
                     if key in attn_store:
                         attn_store[key].append(attn)
                     else:
                         attn_store[key] = [attn]
-                    # del attn
                 
                 x = x_attn + x
                 

@@ -1,3 +1,4 @@
+import torch
 from functools import partial
 from typing import List, Optional, Union
 
@@ -551,29 +552,45 @@ class VideoUNet(nn.Module):
             
         h = h.type(x.dtype)
 
+        VIS_RES = 36  ## 36, 64
+        out_attn = []
+
         for key in self.attention_store[step_key]:
-            for attn in self.attention_store[step_key][key]:
-                print(f"Step {step_key} {key}: {attn.shape}")
-        '''
-        down_temporal_cross: torch.Size([92160, 25, 77])
-        down_temporal_cross: torch.Size([92160, 25, 77])
-        down_temporal_cross: torch.Size([46080, 25, 77])
-        down_temporal_cross: torch.Size([46080, 25, 77])
-        down_temporal_cross: torch.Size([23040, 25, 77])
-        down_temporal_cross: torch.Size([23040, 25, 77]) heads: 20  b: 1152
+            if 'up' in key or 'down' in key:
+                for attn in self.attention_store[step_key][key]:
+                    # print(f"Step:{step_key} {key}: {attn.shape}")  
+                    ## (2 25) h_z w_z 77
+                    
+                    if attn.shape[1] == VIS_RES:
+                        out_attn.append(attn.unsqueeze(0))
+                        ## 1, 50, 36, 64, 77
+        out_attn = torch.cat(out_attn, dim=0).mean(dim=0)
+        print(f"Step:{step_key} {key}: {out_attn.shape}")
         
-        mid_temporal_cross: torch.Size([5760, 25, 77]) heads: 20  b: 288
-        
-        up_temporal_cross: torch.Size([23040, 25, 77]) heads: 20  b: 1152
-        up_temporal_cross: torch.Size([23040, 25, 77]) heads: 20  b: 1152
-        up_temporal_cross: torch.Size([23040, 25, 77]) heads: 20  b: 1152
-        up_temporal_cross: torch.Size([46080, 25, 77]) heads: 10
-        up_temporal_cross: torch.Size([46080, 25, 77]) heads: 10
-        up_temporal_cross: torch.Size([46080, 25, 77]) heads: 10
-        up_temporal_cross: torch.Size([92160, 25, 77]) heads: 5
-        up_temporal_cross: torch.Size([92160, 25, 77]) heads: 5
-        up_temporal_cross: torch.Size([92160, 25, 77]) heads: 5  q## (2 72 128 5) 25 77 
         '''
+        Step:30 down_temporal_cross: torch.Size([50, 72, 128, 77])                                                                                                                                 
+        Step:30 down_temporal_cross: torch.Size([50, 72, 128, 77])                                                                                                                                 
+        Step:30 down_temporal_cross: torch.Size([50, 36, 64, 77]) #                                                                                                                                  
+        Step:30 down_temporal_cross: torch.Size([50, 36, 64, 77]) #                                                                                                                                 
+        Step:30 down_temporal_cross: torch.Size([50, 18, 32, 77])                                                                                                                                  
+        Step:30 down_temporal_cross: torch.Size([50, 18, 32, 77])                                                                                                                                  
+        
+        Step:30 mid_temporal_cross: torch.Size([50, 9, 16, 77])                                                                                                                                    
+        
+        Step:30 up_temporal_cross: torch.Size([50, 18, 32, 77])                                                                                                                                    
+        Step:30 up_temporal_cross: torch.Size([50, 18, 32, 77])                                                                                                                                    
+        Step:30 up_temporal_cross: torch.Size([50, 18, 32, 77])                                                                                                                                    
+        Step:30 up_temporal_cross: torch.Size([50, 36, 64, 77]) #                                                                                                                                   
+        Step:30 up_temporal_cross: torch.Size([50, 36, 64, 77]) #                                                                                                                                   
+        Step:30 up_temporal_cross: torch.Size([50, 36, 64, 77]) #                                                                                                                                   
+        Step:30 up_temporal_cross: torch.Size([50, 72, 128, 77])                                                                                                                                   
+        Step:30 up_temporal_cross: torch.Size([50, 72, 128, 77])                                                                                                                                   
+        Step:30 up_temporal_cross: torch.Size([50, 72, 128, 77])                                                                                                                                   
+        '''
+        
+        # TODO: 2. for i in range(len(tokens)): 
+        #      image = attention_maps[:, :, i]
+        
         
         out = self.out(h)
         print(f"VideoUNet output's shape: {out.shape}" )  ## [50, 4, 72, 128]

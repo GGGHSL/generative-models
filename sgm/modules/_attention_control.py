@@ -4,6 +4,7 @@ from PIL import Image
 from diffusers import StableDiffusionPipeline
 import torch.nn.functional as nnf
 import numpy as np
+import math
 import abc
 import _ptp_utils as ptp_utils
 import _seq_aligner as seq_aligner
@@ -75,6 +76,7 @@ class AttentionControl(abc.ABC):
         raise NotImplementedError
 
     def __call__(self, attn, is_cross: bool, place_in_unet: str):
+        # print(self.cur_att_layer, self.num_uncond_att_layers)
         if self.cur_att_layer >= self.num_uncond_att_layers:
             if LOW_RESOURCE:
                 attn = self.forward(attn, is_cross, place_in_unet)
@@ -254,12 +256,18 @@ if __name__ == "__main__":
         num_pixels = res ** 2
         for location in from_where:  # ("up", "down")
             for item in attention_maps[f"{location}_{'cross' if is_cross else 'self'}"]:
-                if item.shape[1] == num_pixels:
+                if item.shape[1] == num_pixels:  ## only visualize maps with certain resoluation
                     cross_maps = item.reshape(len(prompts), -1, res, res, item.shape[-1])[select]
-                    print("cross_maps.shape: {cross_maps.shape}")
+                    print(f"cross_maps.shape: {cross_maps.shape}")   ## [8, 16, 16, 77]
                     out.append(cross_maps)
+                else:
+                    # print(f">>> item shape: {item.shape}")
+                    _res = int(math.sqrt(item.shape[1]))
+                    _maps = item.reshape(len(prompts), -1, _res, _res, item.shape[-1])[select]
+                    print(f">>> discarded _maps.shape: {_maps.shape}")  ## [8, 32, 32, 77]
         out = torch.cat(out, dim=0)
         out = out.sum(0) / out.shape[0]
+        print(f"aggregate cross_maps shape: {out.shape}")  ## [16, 16, 77]
         return out.cpu()
 
 
@@ -271,8 +279,9 @@ if __name__ == "__main__":
         ):
         tokens = tokenizer.encode(prompts[select])
         decoder = tokenizer.decode
-        attention_maps = aggregate_attention(attention_store, res, from_where, True, select)
+        attention_maps = aggregate_attention(attention_store, res, from_where, True, select)   ## 16, 16, 77
         images = []
+        print(f"len(tokens): {len(tokens)}")   ## 10
         for i in range(len(tokens)):
             image = attention_maps[:, :, i]
             image = 255 * image / image.max()
@@ -310,7 +319,7 @@ if __name__ == "__main__":
         return images, x_t
     
     g_cpu = torch.Generator().manual_seed(8888)
-    prompts = ["A painting of a squirrel eating a burger"]
+    prompts = ["A painting of a squirrel eating a burger"]   ## len(tokens) = 8 + 2:=<start>+<end>
     controller = AttentionStore()
     image, x_t = run_and_display(prompts, controller, latent=None, run_baseline=False, generator=g_cpu)
     show_cross_attention(controller, res=16, from_where=("up", "down"))
