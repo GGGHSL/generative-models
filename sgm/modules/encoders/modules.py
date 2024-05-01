@@ -215,15 +215,20 @@ class GeneralConditioner(nn.Module):
         output = dict()
         if force_zero_embeddings is None:
             force_zero_embeddings = []
+        
+        ## Note: all embedders other than "cond_time_txt" will be ignored.
+        all_tokens = []
         for embedder in self.embedders:
             embedding_context = nullcontext if embedder.is_trainable else torch.no_grad
             with embedding_context():
                 if hasattr(embedder, "input_key") and (embedder.input_key is not None):
                     if embedder.input_key != "cond_time_txt":
                         continue
+                    
                     if embedder.legacy_ucg_val is not None:
                         batch = self.possibly_get_ucg_val(embedder, batch)
-                    emb_out = embedder(batch[embedder.input_key])
+                    emb_out = embedder(batch[embedder.input_key], use_tokens=True)
+                    all_tokens = embedder.all_tokens  ## extract only after a FF with 'use_tokens=True'.
                 else:
                     continue
             assert isinstance(
@@ -233,9 +238,10 @@ class GeneralConditioner(nn.Module):
             if not isinstance(emb_out, (list, tuple)):
                 emb_out = [emb_out]
             
+            output["all_tokens"] = all_tokens
+
             for emb in emb_out:
                 out_key = self.OUTPUT_DIM2KEYS[emb.dim()]
-                ## TODO:
                 if hasattr(embedder, "input_key") and embedder.input_key == "cond_time_txt":
                     out_key = "time_context"
                     
@@ -262,6 +268,7 @@ class GeneralConditioner(nn.Module):
                     )
                 else:
                     output[out_key] = emb
+                
         return output
     
     def get_time_unconditional_conditioning(
@@ -684,13 +691,18 @@ class FrozenOpenCLIPEmbedder(AbstractEmbModel):
         for param in self.parameters():
             param.requires_grad = False
 
-    def forward(self, text):
+    def forward(self, text, use_tokens=False):
         tokens = open_clip.tokenize(text)
         z = self.encode_with_transformer(tokens.to(self.device))
+        # print(f"Tokens: {type(tokens)} {tokens}  |  Encodes: {type(z)} {z.shape}")
+
+        if use_tokens:
+            self.all_tokens = tokens[tokens.nonzero(as_tuple=True)].type(torch.int32).tolist()
+
         return z
 
-    def encode_with_transformer(self, text):
-        x = self.model.token_embedding(text)  # [batch_size, n_ctx, d_model]
+    def encode_with_transformer(self, tokens):
+        x = self.model.token_embedding(tokens)  # [batch_size, n_ctx, d_model]
         x = x + self.model.positional_embedding
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)

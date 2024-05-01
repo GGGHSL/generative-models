@@ -8,7 +8,6 @@ import math
 import abc
 import _ptp_utils as ptp_utils
 import _seq_aligner as seq_aligner
-from open_clip import SimpleTokenizer
 
 
 MY_TOKEN = 'GGGHSL'
@@ -277,11 +276,19 @@ if __name__ == "__main__":
             from_where: List[str],   # ("up", "down")
             select: int = 0
         ):
+        
+        from transformers.models.clip.tokenization_clip import CLIPTokenizer
+        CLIPTokenizer.decode
+        # print(tokenizer.__class__.__name__)   ## CLIPTokenizer
+        
         tokens = tokenizer.encode(prompts[select])
         decoder = tokenizer.decode
+        
         attention_maps = aggregate_attention(attention_store, res, from_where, True, select)   ## 16, 16, 77
         images = []
-        print(f"len(tokens): {len(tokens)}")   ## 10
+        print(f"len(tokens): {type(tokens)} {len(tokens)}")   ## <class 'list'> 10
+        print(tokens)  ## [49406, 320, 3086, 539, 320, 14004, 4371, 320, 6548, 49407]
+        
         for i in range(len(tokens)):
             image = attention_maps[:, :, i]
             image = 255 * image / image.max()

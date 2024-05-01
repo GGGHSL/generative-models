@@ -50,6 +50,7 @@ class DiffusionEngine(pl.LightningModule):
         self.model = get_obj_from_str(default(network_wrapper, OPENAIUNETWRAPPER))(
             model, compile_model=compile_model
         )
+        ## self.model.diffusion_model
 
         self.denoiser = instantiate_from_config(denoiser_config)
         self.sampler = (

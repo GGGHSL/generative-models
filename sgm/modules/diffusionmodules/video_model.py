@@ -467,7 +467,6 @@ class VideoUNet(nn.Module):
         num_video_frames: Optional[int] = None,
         image_only_indicator: Optional[th.Tensor] = None,
     ):
-        # self.attention_store = {}  ## TODO: save by time step?
         self.cur_step += 1
 
         print("VideoUNet cur_step: ", self.cur_step)
@@ -590,10 +589,10 @@ class VideoUNet(nn.Module):
         
         # TODO: 2. for i in range(len(tokens)): 
         #      image = attention_maps[:, :, i]
-        
-        
         out = self.out(h)
         print(f"VideoUNet output's shape: {out.shape}" )  ## [50, 4, 72, 128]
         
-        self._reset()
+        # self._reset()
+        self.attention_store[step_key] = out_attn
+
         return out
