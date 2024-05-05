@@ -470,6 +470,7 @@ class VideoUNet(nn.Module):
         self.cur_step += 1
 
         print("VideoUNet cur_step: ", self.cur_step)
+        print(f"Input latent's shape {x.shape}")  ## [50, 8, 72, 128]
         step_key = str(self.cur_step)
         if not step_key in self.attention_store:
             self.attention_store[step_key] = {}
@@ -563,9 +564,14 @@ class VideoUNet(nn.Module):
                     if attn.shape[1] == VIS_RES:
                         out_attn.append(attn.unsqueeze(0))
                         ## 1, 50, 36, 64, 77
-        out_attn = torch.cat(out_attn, dim=0).mean(dim=0)
-        print(f"Step:{step_key} {key}: {out_attn.shape}")
-        
+        if len(out_attn) > 0:
+            out_attn = torch.cat(out_attn, dim=0).mean(dim=0)
+            print(f"Step:{step_key} {key}: {out_attn.shape}")
+            
+            self.attention_store[step_key] = out_attn
+        else:
+            del self.attention_store[step_key]
+
         '''
         Step:30 down_temporal_cross: torch.Size([50, 72, 128, 77])                                                                                                                                 
         Step:30 down_temporal_cross: torch.Size([50, 72, 128, 77])                                                                                                                                 
@@ -593,6 +599,5 @@ class VideoUNet(nn.Module):
         print(f"VideoUNet output's shape: {out.shape}" )  ## [50, 4, 72, 128]
         
         # self._reset()
-        self.attention_store[step_key] = out_attn
 
         return out
